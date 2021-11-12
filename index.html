@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<title>three.js webgl - loaders - MMD loader</title>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+	<link type="text/css" rel="stylesheet" href="main.css">
+	<style>
+		body {
+			background-color: #fff;
+			color: #444;
+		}
+
+		a {
+			color: #08f;
+		}
+	</style>
+</head>
+
+<body>
+	<div id="info"></div>
+
+	<script src="js/libs/ammo.wasm.js"></script>
+	<script src="scoreoutputer.min.js"></script>
+	<script>
+		// 建構子 ScoreOutputer 接受一個字串，該字串為 csv 的檔案名稱
+		// 以下面範例，檔名就為 "109598105(總分: 6).csv"
+		var so = new ScoreOutputer("109598105");
+		so.installCSS(function () {
+			// 安裝 bootstrap 的 css，如果在 html 上方引用 bootstrap 5.1.1 的話就不用使用 installCSS ，注意一定要 bootstrap css 5.1.1 版
+			// installCSS 接收一個 callback 當作參數，作為成功安裝 bootstrap css 的回呼函式
+
+			//加入項目，分數，完成狀況
+			//第一個參數為 項目名稱
+			//第2個參數為 項目分數
+			//第3個參數為 完成狀況，有完成 true/未完成 false
+			//有幾個項目就呼叫幾個 addChild
+			//addChild 要比 renderModal 先呼叫
+			so.addChild("繪製出 5 個畫面", 1, true);
+			so.addChild("回答問題", 1, true);
+			so.addChild("可按鍵選擇上 / 下一隻角色", 1, true);
+			so.addChild("讀取作業 2 儲存的座標點在眼睛上繪製出分割線", 1, true);
+			so.addChild("可選擇當下控制哪個虹膜", 1, true);
+			so.addChild("按滑鼠左鍵控制虹膜移動，右鍵停止", 2, true);
+			so.addChild("複製參數至對應目標參數", 2, true);
+			so.addChild("可儲存虹膜轉動角度", 1, true);
+
+			//產生自評表，參數如下所示
+			so.renderModal(
+				//1. 自評表插入位置 (預設 document.body)
+				document.body,
+				//2. 自評表背景 (預設紅色)
+				'rgba(100,45,58,1)',
+				//3. 自評表文字顏色 (預設白色)
+				'white',
+				//4. 自評表文字大小 (預設 14pt)
+				'15pt',
+				//5. 自評表 checkbox 文字大小 (預設多少忘了)
+				'15px',
+				//6. 自評表標題 (預設 "自我評分表")
+				dialogTitle = "自我評分表"
+			);
+
+			//設定下載按鈕 <-- 一定要呼叫這個函數，不然沒有下載功能
+			so.installDownloadBtn();
+
+			//產生 "開啟自評表按鈕"
+			so.renderBtn(
+				//自評表按鈕插入位置
+				document.querySelector("#info"),
+				//自評表按鈕文字
+				"開啟自評表"
+			);
+		});
+	</script>
+	<script type="module">
+
+		import * as THREE from './build/three.module.js';
+		import { GUI } from './jsm/libs/dat.gui.module.js';
+		import { OrbitControls } from './jsm/controls/OrbitControls.js';
+		import { OutlineEffect } from './jsm/effects/OutlineEffect.js';
+		import { MMDLoader } from './jsm/loaders/MMDLoader.js';
+		import { MMDAnimationHelper } from './jsm/animation/MMDAnimationHelper.js';
+		
+		const loader = new MMDLoader();
+		let helper;
+		let SCREEN_WIDTH = window.innerWidth;
+		let SCREEN_HEIGHT = window.innerHeight;
+		let aspect = SCREEN_WIDTH / SCREEN_HEIGHT;
+		let cameras = [];
+		let scene, renderer, effect;
+		
+		// LINE PARAMS
+
+		const lineVert = [];
+		lineVert.push(new THREE.Vector3(-0.5, 0, 10));
+		lineVert.push(new THREE.Vector3(0.5, 0, 10));
+
+		const lineGeo = new THREE.BufferGeometry().setFromPoints(lineVert);
+		const lineMaterialRed = new THREE.LineBasicMaterial( { color: 0xff0000, linewidth: 8} );
+		const lineMaterialGreen = new THREE.LineBasicMaterial( { color: 0x00ff00, linewidth: 8} );
+
+		// CAMERA PARAMS
+
+		let cameraZooms = [35, 8, 8, 8, 8];
+		let cameraLROffset = 0.52;
+		let frustumSize = 30;
+
+		let viewportProp = [
+			[0, 0, SCREEN_WIDTH / 2, SCREEN_HEIGHT],
+			[SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2, SCREEN_WIDTH / 4, SCREEN_HEIGHT / 2],
+			[SCREEN_WIDTH * 3 / 4, SCREEN_HEIGHT / 2, SCREEN_WIDTH / 4, SCREEN_HEIGHT / 2],
+			[SCREEN_WIDTH / 2, 0, SCREEN_WIDTH / 4, SCREEN_HEIGHT / 2],
+			[SCREEN_WIDTH * 3 / 4, 0, SCREEN_WIDTH / 4, SCREEN_HEIGHT / 2],
+		]
+
+		// MMD PARAMS
+
+		let mmdCount = 3;
+		let mmdObjs = [mmdCount];
+
+		let currentEyeId = 0;
+		let currentMmdId = 0;
+		let isEyeMoving = false;
+
+		let mouseLastVec = new THREE.Vector2(0, 0);
+		let mouseMoveVec = new THREE.Vector2(0, 0);
+
+		mmdObjs[0] = {
+			location: 'models/mmd/kizunaai/kizunaai.pmx',
+			mesh: null,
+			cameraPosY: 8.2,
+			lineGroup: [new THREE.Group(), new THREE.Group()], // lineGroup[0]: right eye, lineGroup[1]: left eye
+			eyeBoneId: [88, 86], // eyeBoneId[0]: right eye id, eyeBoneId[1]: left eye id,
+			eyeRotateAng: [8.5, 8.5, -11.1, -11.1, 8.0, 12.8, -12.8, -8.0],
+			line_locX_1: 0,
+			line_locY_1: 0,
+			line_locX_2: 0,
+			line_locY_2: 0,
+			line_locX_3: 0,
+			line_locY_3: 0,
+			line_locX_4: 0,
+			line_locY_4: 0,
+		}
+
+		mmdObjs[1] = {
+			location: 'models/mmd/るいのれ式物述有栖_配布用フォルダ/物述有栖.pmx',
+			mesh: null,
+			cameraPosY: 4.5,
+			lineGroup: [new THREE.Group(), new THREE.Group()],
+			eyeBoneId: [13, 11],
+			eyeRotateAng: [14.4, 14.4, -16.4, -16.4, 10.0, 20.4, -20.4, -10.0],
+			line_locX_1: 0,
+			line_locY_1: 0,
+			line_locX_2: 0,
+			line_locY_2: 0,
+			line_locX_3: 0,
+			line_locY_3: 0,
+			line_locX_4: 0,
+			line_locY_4: 0,
+		}
+
+		mmdObjs[2] = {
+			location: 'models/mmd/『天宮こころ(Kokoro Amamiya)』/『天宮こころ(Kokoro Amamiya)』.pmx',
+			mesh: null,
+			cameraPosY: 5.5,
+			lineGroup: [new THREE.Group(), new THREE.Group()],
+			eyeBoneId: [51, 49],
+			eyeRotateAng: [18.2, 18.2, -13.5, -13.5, 11.0, 15.9, -15.9, -11.0],
+			line_locX_1: 0,
+			line_locY_1: 0,
+			line_locX_2: 0,
+			line_locY_2: 0,
+			line_locX_3: 0,
+			line_locY_3: 0,
+			line_locX_4: 0,
+			line_locY_4: 0,
+		}
+		
+		for(let i = 0; i < mmdCount; i++) {
+			for(let j = 0; j < 8; j++) {
+				mmdObjs[i].eyeRotateAng[j] = THREE.MathUtils.degToRad( mmdObjs[i].eyeRotateAng[j] );
+			}
+		}
+		
+
+		Ammo().then(function (AmmoLib) {
+			Ammo = AmmoLib;
+
+			init();
+			animate();
+
+		});
+
+		function init() {
+
+			const container = document.createElement('div');
+			document.body.appendChild(container);
+
+			cameras[0] = new THREE.OrthographicCamera(0.5 * frustumSize * aspect / - 2, 0.5 * frustumSize * aspect / 2, frustumSize / 2, frustumSize / - 2, 0.1, 1000);
+			cameras[1] = new THREE.OrthographicCamera(0.25 * frustumSize * aspect / - 2, 0.25 * frustumSize * aspect / 2, 0.5 * frustumSize / 2, 0.5 * frustumSize / - 2, 0.1, 1000);
+			cameras[2] = new THREE.OrthographicCamera(0.25 * frustumSize * aspect / - 2, 0.25 * frustumSize * aspect / 2, 0.5 * frustumSize / 2, 0.5 * frustumSize / - 2, 0.1, 1000);
+			cameras[3] = new THREE.OrthographicCamera(0.25 * frustumSize * aspect / - 2, 0.25 * frustumSize * aspect / 2, 0.5 * frustumSize / 2, 0.5 * frustumSize / - 2, 0.1, 1000);
+			cameras[4] = new THREE.OrthographicCamera(0.25 * frustumSize * aspect / - 2, 0.25 * frustumSize * aspect / 2, 0.5 * frustumSize / 2, 0.5 * frustumSize / - 2, 0.1, 1000);
+
+			cameras[0].position.x = - cameraLROffset;
+			for(let i = 0; i < 5; i++) {
+				cameras[i].position.y = mmdObjs[currentMmdId].cameraPosY;
+				cameras[i].position.z = 30;
+				cameras[i].zoom = cameraZooms[i];
+				cameras[i].updateProjectionMatrix();
+			}			
+
+
+			// SCENE
+
+			scene = new THREE.Scene();
+			const ambient = new THREE.AmbientLight(0x666666);
+			scene.add(ambient);
+
+			const directionalLight = new THREE.DirectionalLight(0x887766);
+			directionalLight.position.set(- 1, 1, 1).normalize();
+			scene.add(directionalLight);
+
+			// RENDER
+
+			renderer = new THREE.WebGLRenderer({ antialias: true });
+			renderer.setPixelRatio(window.devicePixelRatio);
+			renderer.setSize(window.innerWidth, window.innerHeight);
+			container.appendChild(renderer.domElement);
+			renderer.autoClear = false;
+			effect = new OutlineEffect(renderer);
+
+			// MODEL
+			
+
+			helper = new MMDAnimationHelper();
+
+			// loading all models when init()
+			for(let i = 0; i < mmdCount; i++) {
+
+				loader.load(mmdObjs[i].location, function (object) {
+
+					mmdObjs[i].mesh = object;
+					mmdObjs[i].mesh.position.y = -10;
+
+					if(i != 0) mmdObjs[i].mesh.visible = false;
+
+					scene.add(mmdObjs[i].mesh);
+
+				}, onProgress, null);
+			}
+
+			// JSON FILE
+
+			let jsonData;
+			jsonLoader('./model_data.json', function(text){
+				jsonData = JSON.parse(text);
+				
+				for(let i = 0; i < mmdCount; i++) {
+					let curMmdObj = mmdObjs[i];
+
+					curMmdObj.line_locX_1 = (jsonData[i].line_locationx_1 + jsonData[i].line_locationx_3) / 2;
+					curMmdObj.line_locY_1 = jsonData[i].line_locationy_1;
+					curMmdObj.line_locX_2 = jsonData[i].line_locationx_2;
+					curMmdObj.line_locY_2 = (jsonData[i].line_locationy_2 + jsonData[i].line_locationy_4) / 2;
+					curMmdObj.line_locX_3 = (jsonData[i].line_locationx_1 + jsonData[i].line_locationx_3) / 2;
+					curMmdObj.line_locY_3 = jsonData[i].line_locationy_3;
+					curMmdObj.line_locX_4 = jsonData[i].line_locationx_4;
+					curMmdObj.line_locY_4 = (jsonData[i].line_locationy_2 + jsonData[i].line_locationy_4) / 2;
+					
+					
+					let segmentX = (curMmdObj.line_locX_2 - curMmdObj.line_locX_4) / 8;
+					let segmentY = (curMmdObj.line_locY_1 - curMmdObj.line_locY_3) / 4;
+
+					// construct right eye array
+					for(let j = 0; j < 9; j++) {
+						let tempLine = new THREE.Line(lineGeo, lineMaterialRed);
+
+						let tempX = - (curMmdObj.line_locX_4 + segmentX * j);
+						let tempY = curMmdObj.line_locY_4;
+
+						tempLine.rotation.z = Math.PI / 2;
+						tempLine.position.set(tempX, tempY, 0);
+						curMmdObj.lineGroup[0].add(tempLine);
+					}
+
+					for(let j = 0; j < 5; j++) {
+						let tempLine = new THREE.Line(lineGeo, lineMaterialGreen);
+
+						let tempX = - curMmdObj.line_locX_3;
+						let tempY = curMmdObj.line_locY_3 + segmentY * j;
+
+						tempLine.position.set(tempX, tempY, 0);
+						curMmdObj.lineGroup[0].add(tempLine);
+					}
+
+					// construct left eye array
+					for(let j = 0; j < 9; j++) {
+						let tempLine = new THREE.Line(lineGeo, lineMaterialRed);
+
+						let tempX = curMmdObj.line_locX_4 + segmentX * j;
+						let tempY = curMmdObj.line_locY_4;
+						
+						tempLine.rotation.z = Math.PI / 2;
+						tempLine.position.set(tempX, tempY, 0);
+						curMmdObj.lineGroup[1].add(tempLine);
+					}
+
+					for(let j = 0; j < 5; j++) {
+						let tempLine = new THREE.Line(lineGeo, lineMaterialGreen);
+
+						let tempX = curMmdObj.line_locX_3;
+						let tempY = curMmdObj.line_locY_3 + segmentY * j;
+
+						tempLine.position.set(tempX, tempY, 0);
+						curMmdObj.lineGroup[1].add(tempLine);
+					}
+
+					curMmdObj.lineGroup[0].visible = false;
+					curMmdObj.lineGroup[1].visible = false;
+
+					scene.add(curMmdObj.lineGroup[0]);
+					scene.add(curMmdObj.lineGroup[1]);
+				}
+			});
+
+
+			// EVENT
+
+			window.addEventListener('resize', onWindowResize);
+			window.addEventListener('keydown', onKeyDown);
+			window.addEventListener('mousedown', onMouseDown);
+			window.addEventListener('mousemove', onMouseMove);
+			document.addEventListener('contextmenu', event => event.preventDefault());
+		}
+
+		function onProgress(xhr) {
+			if (xhr.lengthComputable) {
+
+				const percentComplete = xhr.loaded / xhr.total * 100;
+				console.log(Math.round(percentComplete, 2) + '% downloaded');
+			}
+		}			
+
+		function onWindowResize() {
+
+			SCREEN_WIDTH = window.innerWidth;
+			SCREEN_HEIGHT = window.innerHeight;
+			aspect = SCREEN_WIDTH / SCREEN_HEIGHT;
+
+			viewportProp = [
+				[0, 0, SCREEN_WIDTH / 2, SCREEN_HEIGHT],
+				[SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2, SCREEN_WIDTH / 4, SCREEN_HEIGHT / 2],
+				[SCREEN_WIDTH * 3 / 4, SCREEN_HEIGHT / 2, SCREEN_WIDTH / 4, SCREEN_HEIGHT / 2],
+				[SCREEN_WIDTH / 2, 0, SCREEN_WIDTH / 4, SCREEN_HEIGHT / 2],
+				[SCREEN_WIDTH * 3 / 4, 0, SCREEN_WIDTH / 4, SCREEN_HEIGHT / 2],
+			]
+
+			// effect.setSize(SCREEN_WIDTH, SCREEN_HEIGHT);
+
+			cameras[0].left = 0.5 * frustumSize * aspect / - 2;
+			cameras[0].right = 0.5 * frustumSize * aspect / 2;
+			cameras[0].top = frustumSize / 2;
+			cameras[0].bottom = - frustumSize / 2;
+			cameras[0].updateProjectionMatrix();
+
+			cameras[1].left = 0.25 * frustumSize * aspect / - 2;
+			cameras[1].right = 0.25 * frustumSize * aspect / 2;
+			cameras[1].top = 0.5 * frustumSize / 2;
+			cameras[1].bottom = - 0.5 * frustumSize / 2;
+			cameras[1].updateProjectionMatrix();
+
+			cameras[2].left = 0.25 * frustumSize * aspect / - 2;
+			cameras[2].right = 0.25 * frustumSize * aspect / 2;
+			cameras[2].top = 0.5 * frustumSize / 2;
+			cameras[2].bottom = - 0.5 * frustumSize / 2;
+			cameras[2].updateProjectionMatrix();
+
+			cameras[3].left = 0.25 * frustumSize * aspect / - 2;
+			cameras[3].right = 0.25 * frustumSize * aspect / 2;
+			cameras[3].top = 0.5 * frustumSize / 2;
+			cameras[3].bottom = - 0.5 * frustumSize / 2;
+			cameras[3].updateProjectionMatrix();
+
+			cameras[4].left = 0.25 * frustumSize * aspect / - 2;
+			cameras[4].right = 0.25 * frustumSize * aspect / 2;
+			cameras[4].top = 0.5 * frustumSize / 2;
+			cameras[4].bottom = - 0.5 * frustumSize / 2;
+			cameras[4].updateProjectionMatrix();
+
+			for(let i = 0; i < 5; i++) {
+				cameras[i].position.y = mmdObjs[currentMmdId].cameraPosY;
+				cameras[i].updateProjectionMatrix();
+			}
+
+
+			
+
+			
+		}
+
+		function onKeyDown() {
+			switch(event.keyCode) {
+				case 65: // key 'A' for last model
+					currentEyeId = 0;
+					isEyeMoving = false;
+
+					mmdObjs[currentMmdId].mesh.visible = false;
+					mmdObjs[currentMmdId].lineGroup[0].visible = false;
+					mmdObjs[currentMmdId].lineGroup[1].visible = false;
+
+					currentMmdId = (currentMmdId + mmdCount - 1) % mmdCount;
+					
+					mmdObjs[currentMmdId].mesh.visible = true;
+					if(currentEyeId % 2 == 0) {
+						mmdObjs[currentMmdId].lineGroup[1].visible = true;
+					}
+					else {
+						mmdObjs[currentMmdId].lineGroup[0].visible = true;
+					}
+
+					// update camera position
+					cameras[0].position.x = - cameraLROffset;
+					for(let i = 0; i < 5; i++) {
+						cameras[i].position.y = mmdObjs[currentMmdId].cameraPosY;
+						cameras[i].updateProjectionMatrix();
+					}
+
+					break;
+
+				case 68: // key 'D' for next model
+					currentEyeId = 0;
+					isEyeMoving = false;
+
+					mmdObjs[currentMmdId].mesh.visible = false;
+					mmdObjs[currentMmdId].lineGroup[0].visible = false;
+					mmdObjs[currentMmdId].lineGroup[1].visible = false;
+
+					currentMmdId = (currentMmdId + mmdCount + 1) % mmdCount;
+
+					mmdObjs[currentMmdId].mesh.visible = true;
+					if(currentEyeId % 2 == 0) {
+						mmdObjs[currentMmdId].lineGroup[1].visible = true;
+					}
+					else {
+						mmdObjs[currentMmdId].lineGroupL[0].visible = true;
+					}
+
+					// update camera position
+					cameras[0].position.x = - cameraLROffset;
+					for(let i = 0; i < 5; i++) {
+						cameras[i].position.y = mmdObjs[currentMmdId].cameraPosY;
+						cameras[i].updateProjectionMatrix();
+					}
+					
+					break;
+				case 49: // key '1' for switching to previous eye
+					isEyeMoving = false;
+					if(currentEyeId % 2 == 0) {
+						// draw left eye
+						cameras[0].position.x = cameraLROffset;
+						cameras[0].updateProjectionMatrix();
+						mmdObjs[currentMmdId].lineGroup[1].visible = false;
+						mmdObjs[currentMmdId].lineGroup[0].visible = true;
+						
+					}
+					else {
+						// draw right eye
+						cameras[0].position.x = -cameraLROffset;
+						cameras[0].updateProjectionMatrix();
+						mmdObjs[currentMmdId].lineGroup[1].visible = false;
+						mmdObjs[currentMmdId].lineGroup[0].visible = true;
+					}
+					currentEyeId = (currentEyeId + 7) % 8;
+					
+					break;
+
+				case 50: // key '2' for switching to next eye
+					isEyeMoving = false;
+					if(currentEyeId % 2 == 0) {
+						// draw right eye
+						cameras[0].position.x = cameraLROffset;
+						cameras[0].updateProjectionMatrix();
+						mmdObjs[currentMmdId].lineGroup[1].visible = false;
+						mmdObjs[currentMmdId].lineGroup[0].visible = true;
+					}
+					else {
+						// draw left eye
+						cameras[0].position.x = - cameraLROffset;
+						cameras[0].updateProjectionMatrix();
+						mmdObjs[currentMmdId].lineGroup[0].visible = false;
+						mmdObjs[currentMmdId].lineGroup[1].visible = true;
+					}
+					currentEyeId = (currentEyeId + 1) % 8;
+
+					break;
+				case 81: // key 'q' for copy parameter
+					let copy_from_index = [1, 0, 3, 2, 7, 6, 5, 4];
+					
+					if(currentEyeId <= 3) {
+						mmdObjs[currentMmdId].eyeRotateAng[copy_from_index[currentEyeId]] = mmdObjs[currentMmdId].eyeRotateAng[currentEyeId];
+					} 
+					else {
+						mmdObjs[currentMmdId].eyeRotateAng[copy_from_index[currentEyeId]] = - mmdObjs[currentMmdId].eyeRotateAng[currentEyeId];
+					}
+					break;
+				case 83: // key 's' for save json
+					console.log('press s');
+					let modellist = [];
+
+					for(let i = 0; i < mmdCount; i++) {
+						modellist[i] = {
+							location: mmdObjs[i].location,
+							line_locX_1: mmdObjs[i].line_locX_1,
+							line_locY_1: mmdObjs[i].line_locY_1,
+							line_locX_2: mmdObjs[i].line_locX_2,
+							line_locY_2: mmdObjs[i].line_locY_2,
+							line_locX_3: mmdObjs[i].line_locX_3,
+							line_locY_3: mmdObjs[i].line_locY_3,
+							line_locX_4: mmdObjs[i].line_locX_4,
+							line_locY_4: mmdObjs[i].line_locY_4,
+
+							// not a good implementation to add negative
+							RXNA: -THREE.MathUtils.radToDeg(mmdObjs[i].eyeRotateAng[0]),
+							LXNA: -THREE.MathUtils.radToDeg(mmdObjs[i].eyeRotateAng[1]),
+							RXPA: -THREE.MathUtils.radToDeg(mmdObjs[i].eyeRotateAng[2]),
+							LXPA: -THREE.MathUtils.radToDeg(mmdObjs[i].eyeRotateAng[3]),
+							RYNA: -THREE.MathUtils.radToDeg(mmdObjs[i].eyeRotateAng[4]),
+							LYNA: -THREE.MathUtils.radToDeg(mmdObjs[i].eyeRotateAng[5]),
+							RYPA: -THREE.MathUtils.radToDeg(mmdObjs[i].eyeRotateAng[6]),
+							LYPA: -THREE.MathUtils.radToDeg(mmdObjs[i].eyeRotateAng[7]),
+						}
+					}
+
+					let jsonData = JSON.stringify(modellist, null, 2);
+					
+					download(jsonData, 'hw3_model_data.json', 'application/json');
+					break;
+			}
+		}
+
+		function onMouseDown( event ) {
+			switch( event.button ) {
+				case 0:
+					isEyeMoving = true;
+					mouseLastVec.x = event.clientX;
+					mouseLastVec.y = event.clientY;
+					break;
+
+				case 2:
+					isEyeMoving = false;
+			}
+		}
+
+		function onMouseMove( event ) {
+			if( isEyeMoving ) {
+				mouseMoveVec.x = event.clientX - mouseLastVec.x;
+				mouseMoveVec.y = event.clientY - mouseLastVec.y;
+
+				mouseLastVec.x = event.clientX;
+				mouseLastVec.y = event.clientY;
+				
+				// update eye rotation
+				let currentMmdObj = mmdObjs[currentMmdId];
+				let tempEyeBoneId = currentMmdObj.eyeBoneId[currentEyeId % 2];
+
+				if( currentEyeId <= 3) {
+					currentMmdObj.eyeRotateAng[currentEyeId] += mouseMoveVec.y / 500;
+				}
+				else {
+					currentMmdObj.eyeRotateAng[currentEyeId] += mouseMoveVec.x / 500;
+				}
+			}
+		}
+
+
+		function jsonLoader(file, callback) {
+			let rawFile = new XMLHttpRequest();
+			rawFile.overrideMimeType('application/json');
+			rawFile.open('GET', file, true);
+			rawFile.onreadystatechange = function() {
+				if(rawFile.readyState === 4 && rawFile.status == '200') {
+					callback(rawFile.responseText);
+				}
+			}
+			rawFile.send(null);
+		}
+
+		function download(content, fileName, contentType) {
+			var a = document.createElement("a");
+			var file = new Blob([content], {type: contentType});
+			a.href = URL.createObjectURL(file);
+			a.download = fileName;
+			a.click();
+		}
+
+		function animate() {
+			requestAnimationFrame(animate);
+			render();
+		}
+
+		function render() {
+			effect.clear();
+			let currentMmdObj = mmdObjs[currentMmdId];
+
+			for(let i = 0; i < 5; i++) {
+
+				// update eyeBone rotation according to camera
+				let temp_r_eye_bone = currentMmdObj.mesh.skeleton.bones[currentMmdObj.eyeBoneId[0]];
+				let temp_l_eye_bone = currentMmdObj.mesh.skeleton.bones[currentMmdObj.eyeBoneId[1]];
+				
+				if(i == 0) {
+					if(currentEyeId <= 3) {
+						currentMmdObj.mesh.skeleton.bones[currentMmdObj.eyeBoneId[currentEyeId % 2]].rotation.x = currentMmdObj.eyeRotateAng[currentEyeId];
+					}
+					else {
+						currentMmdObj.mesh.skeleton.bones[currentMmdObj.eyeBoneId[currentEyeId % 2]].rotation.y = currentMmdObj.eyeRotateAng[currentEyeId];
+					}
+				}
+
+				else if(i == 1 || i == 2) {
+					temp_r_eye_bone.rotation.x = currentMmdObj.eyeRotateAng[(i - 1) * 2];
+					temp_l_eye_bone.rotation.x = currentMmdObj.eyeRotateAng[(i - 1) * 2 + 1];
+				}
+				else {
+					temp_r_eye_bone.rotation.y = currentMmdObj.eyeRotateAng[(i - 1) * 2];
+					temp_l_eye_bone.rotation.y = currentMmdObj.eyeRotateAng[(i - 1) * 2 + 1];
+				}
+
+				// draw line on specific scene
+				if( (Math.floor(currentEyeId / 2) + 1) == i || i == 0 ) {
+					currentMmdObj.lineGroup[currentEyeId % 2].visible = true;
+				}
+
+				// render view port
+				effect.setViewport(viewportProp[i][0], viewportProp[i][1], viewportProp[i][2], viewportProp[i][3]);
+				effect.render(scene, cameras[i]);
+
+				// hide line group
+				currentMmdObj.lineGroup[0].visible = false;
+				currentMmdObj.lineGroup[1].visible = false;
+
+
+				temp_r_eye_bone.rotation.x = 0;
+				temp_r_eye_bone.rotation.y = 0;
+				temp_l_eye_bone.rotation.x = 0;
+				temp_l_eye_bone.rotation.y = 0;
+			}
+		}
+	</script>
+
+</body>
+
+</html>
